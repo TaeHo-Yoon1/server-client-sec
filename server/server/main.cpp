@@ -36,17 +36,27 @@ struct Room {
 static std::vector<Room>        rooms;
 static std::map<SOCKET, Client> clients;
 static std::mutex               mtx;
+static std::map<SOCKET, SSL*>   client_ssl_map;
 
-void broadcast(int room_id, const std::string& msg, SSL* except = nullptr) {
+void broadcast(int room_id, const std::string& msg, SOCKET sender_sock) {
     std::vector<SOCKET> targets;
     {
         std::lock_guard<std::mutex> lock(mtx);
         for (SOCKET s : rooms[room_id].clients) {
-            if (except == nullptr || SSL_get_fd(except) != s) targets.push_back(s);
+            targets.push_back(s);
         }
     }
     for (SOCKET s : targets) {
-        send(s, msg.data(), msg.size(), 0);
+        SSL* ssl = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            auto it = client_ssl_map.find(s);
+            if (it != client_ssl_map.end()) ssl = it->second;
+        }
+        if (ssl) {
+            std::string out_msg = (s == sender_sock) ? ("me: " + msg.substr(msg.find(":") + 1)) : msg;
+            SSL_write(ssl, out_msg.data(), out_msg.size());
+        }
     }
 }
 
@@ -79,6 +89,10 @@ void handleClient(SOCKET sock, SSL_CTX* ctx) {
         SSL_free(ssl);
         closesocket(sock);
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        client_ssl_map[sock] = ssl;
     }
     std::cout << "New client thread started: " << sock << std::endl;
     char buf[1024];
@@ -189,7 +203,7 @@ void handleClient(SOCKET sock, SSL_CTX* ctx) {
             bool sendJoinMsg = false;
             {
                 std::lock_guard<std::mutex> lock(mtx);
-                std::cout << "sock " << sock << " tries to join room " << id << std::endl;
+                std::cout << "sock " << sock << " tries to join room    " << id << std::endl;
                 if (id < 0 || id >= (int)rooms.size()) {
                     const char* msg =
                         "====================\n"
@@ -233,7 +247,10 @@ void handleClient(SOCKET sock, SSL_CTX* ctx) {
             for (auto& p : clients) {
                 if (p.second.nick == target) {
                     std::string out = "==== 시스템 메시지 ====\n(whisper) " + clients[sock].nick + ":" + msg + "\n====================\n";
-                    send(p.first, out.data(), out.size(), 0);
+                    SSL* target_ssl = client_ssl_map[p.first];
+                    if (target_ssl) {
+                        SSL_write(target_ssl, out.data(), out.size());
+                    }
                     break;
                 }
             }
@@ -290,6 +307,7 @@ void handleClient(SOCKET sock, SSL_CTX* ctx) {
                 int rid = clients[sock].room_id;
                 if (rid >= 0 && !clients[sock].nick.empty()) {
                     std::string out = clients[sock].nick + ": " + buf;
+                    broadcast(rid, out, sock);
                 }
             }
         }
@@ -300,6 +318,7 @@ void handleClient(SOCKET sock, SSL_CTX* ctx) {
         int rid = clients[sock].room_id;
         if (rid >= 0) rooms[rid].clients.erase(sock);
         clients.erase(sock);
+        client_ssl_map.erase(sock);
     }
     SSL_shutdown(ssl);
     SSL_free(ssl);
