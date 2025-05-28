@@ -48,6 +48,27 @@ void broadcast(int room_id, const std::string& msg, SOCKET except = INVALID_SOCK
     }
 }
 
+// Levenshtein distance for command suggestion
+int levenshtein(const std::string& s1, const std::string& s2) {
+    const size_t m = s1.size(), n = s2.size();
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1));
+    for (size_t i = 0; i <= m; ++i) dp[i][0] = i;
+    for (size_t j = 0; j <= n; ++j) dp[0][j] = j;
+    for (size_t i = 1; i <= m; ++i) {
+        for (size_t j = 1; j <= n; ++j) {
+            if (s1[i - 1] == s2[j - 1]) dp[i][j] = dp[i - 1][j - 1];
+            else {
+                int a = dp[i - 1][j];
+                int b = dp[i][j - 1];
+                int c = dp[i - 1][j - 1];
+                int min_val = a < b ? (a < c ? a : c) : (b < c ? b : c);
+                dp[i][j] = 1 + min_val;
+            }
+        }
+    }
+    return dp[m][n];
+}
+
 void handleClient(SOCKET sock) {
     std::cout << "New client thread started: " << sock << std::endl;
     char buf[1024];
@@ -68,7 +89,11 @@ void handleClient(SOCKET sock) {
             std::string name;
             iss >> name;
             if (name.empty()) {
-                send(sock, "Invalid nickname\n", strlen("Invalid nickname\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Invalid nickname\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
                 continue;
             }
             std::lock_guard<std::mutex> lock(mtx);
@@ -80,20 +105,28 @@ void handleClient(SOCKET sock) {
                 }
             }
             if (exists) {
-                send(sock, "Nickname in use\n", strlen("Nickname in use\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Nickname in use\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
             }
             else {
                 clients[sock].nick = name;
-                send(sock, "Nickname set\n", strlen("Nickname set\n"), 0);
-                
+                const char* msg =
+                    "====================\n"
+                    "Nickname set\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
                 // Show room list after setting nickname
                 std::ostringstream out;
-                out << "Rooms:\n";
+                out << "====================\nRooms:\n";
                 for (int i = 0; i < (int)rooms.size(); ++i) {
                     out << i << ". " << rooms[i].name
                         << " (" << rooms[i].clients.size()
                         << "/" << MAX_CLIENTS_PER_ROOM << ")\n";
                 }
+                out << "====================\n";
                 auto s = out.str();
                 send(sock, s.data(), s.size(), 0);
             }
@@ -101,12 +134,13 @@ void handleClient(SOCKET sock) {
         else if (cmd == "/list") {
             std::lock_guard<std::mutex> lock(mtx);
             std::ostringstream out;
-            out << "Rooms:\n";
+            out << "====================\nRooms:\n";
             for (int i = 0; i < (int)rooms.size(); ++i) {
                 out << i << ". " << rooms[i].name
                     << " (" << rooms[i].clients.size()
                     << "/" << MAX_CLIENTS_PER_ROOM << ")\n";
             }
+            out << "====================\n";
             auto s = out.str();
             send(sock, s.data(), s.size(), 0);
         }
@@ -115,20 +149,31 @@ void handleClient(SOCKET sock) {
             iss >> rname;
             std::lock_guard<std::mutex> lock(mtx);
             if ((int)rooms.size() >= MAX_ROOMS) {
-                send(sock, "Max rooms reached\n", strlen("Max rooms reached\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Max rooms reached\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
             }
             else {
                 rooms.push_back({ rname, {} });
-                send(sock, "Room created\n", strlen("Room created\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Room created\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
             }
         }
         else if (cmd == "/join") {
             int id;
             if (!(iss >> id)) {
-                send(sock, "Usage: /join <room_id>\n", strlen("Usage: /join <room_id>\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Usage: /join <room_id>\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
                 continue;
             }
-
             int prev = -1;
             std::string leaveMsg, joinMsg;
             bool sendJoinMsg = false;
@@ -136,11 +181,19 @@ void handleClient(SOCKET sock) {
                 std::lock_guard<std::mutex> lock(mtx);
                 std::cout << "sock " << sock << " tries to join room " << id << std::endl;
                 if (id < 0 || id >= (int)rooms.size()) {
-                    send(sock, "No such room\n", strlen("No such room\n"), 0);
+                    const char* msg =
+                        "====================\n"
+                        "No such room\n"
+                        "====================\n";
+                    send(sock, msg, strlen(msg), 0);
                     continue;
                 }
                 else if (rooms[id].clients.size() >= MAX_CLIENTS_PER_ROOM) {
-                    send(sock, "Room full\n", strlen("Room full\n"), 0);
+                    const char* msg =
+                        "====================\n"
+                        "Room full\n"
+                        "====================\n";
+                    send(sock, msg, strlen(msg), 0);
                     continue;
                 }
                 else {
@@ -152,7 +205,11 @@ void handleClient(SOCKET sock) {
                     clients[sock].room_id = id;
                     rooms[id].clients.insert(sock);
                     joinMsg = clients[sock].nick + " joined room " + std::to_string(id) + "\n";
-                    send(sock, "Joined room\n", strlen("Joined room\n"), 0);
+                    const char* msg =
+                        "====================\n"
+                        "Joined room\n"
+                        "====================\n";
+                    send(sock, msg, strlen(msg), 0);
                     sendJoinMsg = !clients[sock].nick.empty();
                 }
             }
@@ -171,7 +228,7 @@ void handleClient(SOCKET sock) {
             std::lock_guard<std::mutex> lock(mtx);
             for (auto& p : clients) {
                 if (p.second.nick == target) {
-                    std::string out = "(whisper) " + clients[sock].nick + ":" + msg + "\n";
+                    std::string out = "==== 시스템 메시지 ====\n(whisper) " + clients[sock].nick + ":" + msg + "\n====================\n";
                     send(p.first, out.data(), out.size(), 0);
                     break;
                 }
@@ -183,11 +240,16 @@ void handleClient(SOCKET sock) {
             if (rid >= 0) {
                 rooms[rid].clients.erase(sock);
                 clients[sock].room_id = -1;
-                send(sock, "Left room\n", strlen("Left room\n"), 0);
+                const char* msg =
+                    "====================\n"
+                    "Left room\n"
+                    "====================\n";
+                send(sock, msg, strlen(msg), 0);
             }
         }
         else if (cmd == "/help") {
-            const char* help_msg = 
+            const char* help_msg =
+                "====================\n"
                 "Available commands:\n"
                 "/help - Show this help message\n"
                 "/nick <name> - Set your nickname\n"
@@ -196,7 +258,8 @@ void handleClient(SOCKET sock) {
                 "/join <room_id> - Join a room\n"
                 "/w <nickname> <message> - Send a whisper to a user\n"
                 "/exit - Leave current room\n"
-                "/quit - Exit the program\n";
+                "/quit - Exit the program\n"
+                "====================\n";
             send(sock, help_msg, strlen(help_msg), 0);
         }
         else if (cmd == "/quit") {
@@ -204,8 +267,21 @@ void handleClient(SOCKET sock) {
         }
         else {
             if (!cmd.empty() && cmd[0] == '/') {
-                const char* unknown_cmd = "Unknown command. Please try again.\n";
-                send(sock, unknown_cmd, strlen(unknown_cmd), 0);
+                // 명령어 추천
+                const char* commands[] = {"/help","/nick","/list","/create","/join","/w","/exit","/quit"};
+                int minDist = 100, idx = -1;
+                for (int i = 0; i < 8; ++i) {
+                    int d = levenshtein(cmd, commands[i]);
+                    if (d < minDist) { minDist = d; idx = i; }
+                }
+                std::ostringstream out;
+                out << "====================\nUnknown command. Please try again.\n";
+                if (minDist <= 3) {
+                    out << "Did you mean: " << commands[idx] << " ?\n";
+                }
+                out << "====================\n";
+                auto s = out.str();
+                send(sock, s.data(), s.size(), 0);
             } else {
                 int rid = clients[sock].room_id;
                 if (rid >= 0 && !clients[sock].nick.empty()) {
