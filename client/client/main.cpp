@@ -8,6 +8,8 @@
 #include <atomic>
 #include <conio.h>
 #include <vector>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -52,6 +54,10 @@ void signal_handler(int) {
 }
 
 int main(int argc, char* argv[]) {
+    // OpenSSL initialization
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -91,7 +97,47 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::thread receive_thread(receive_messages);
+    // SSL context and connection
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        log_error("SSL_CTX_new failed");
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) {
+        log_error("SSL_new failed");
+        SSL_CTX_free(ctx);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+    SSL_set_fd(ssl, client_socket);
+    if (SSL_connect(ssl) <= 0) {
+        log_error("SSL_connect failed");
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        closesocket(client_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    std::thread receive_thread([&ssl]() {
+        char buffer[BUFFER_SIZE];
+        while (running) {
+            int len = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+            if (len <= 0) {
+                if (running) {
+                    log_error("Server disconnected");
+                    running = false;
+                }
+                break;
+            }
+            buffer[len] = '\0';
+            std::cout << buffer << std::flush;
+        }
+    });
     receive_thread.detach();
 
     std::vector<std::string> commands = {
@@ -140,15 +186,20 @@ int main(int argc, char* argv[]) {
             break;
         }
         input += '\n';
-        if (send(client_socket, input.c_str(), input.length(), 0) < 0) {
+        if (SSL_write(ssl, input.c_str(), input.length()) <= 0) {
             log_error("Failed to send message");
             break;
         }
     }
 
     running = false;
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
     closesocket(client_socket);
     WSACleanup();
+    EVP_cleanup();
+    ERR_free_strings();
 
     return 0;
 }
