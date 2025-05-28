@@ -16,12 +16,17 @@
 #include <chrono>
 #include <regex>
 #include <unordered_set>
+#include <intrin.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
 
 constexpr int SERVER_PORT = 9000;
 constexpr int BUFFER_SIZE = 1024;
+
+// 안티 디버깅 관련 상수
+constexpr DWORD DEBUG_CHECK_INTERVAL = 1000; // 1초
+constexpr DWORD MAX_EXECUTION_TIME = 100;    // 100ms
 
 static std::atomic<bool> running{ true };
 static SOCKET client_socket = INVALID_SOCKET;
@@ -240,7 +245,102 @@ bool isMaliciousUrl(const std::string& message) {
     return false;
 }
 
+// 안티 디버깅 함수들
+bool isBeingDebugged() {
+    // IsDebuggerPresent API 체크
+    if (IsDebuggerPresent()) {
+        return true;
+    }
+
+    // PEB 디버그 플래그 검사
+    BOOL isDebuggerPresent = FALSE;
+    CheckRemoteDebuggerPresent(GetCurrentProcess(), &isDebuggerPresent);
+    if (isDebuggerPresent) {
+        return true;
+    }
+
+    // 하드웨어 브레이크포인트 감지
+    CONTEXT ctx = {};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (GetThreadContext(GetCurrentThread(), &ctx)) {
+        if (ctx.Dr0 != 0 || ctx.Dr1 != 0 || ctx.Dr2 != 0 || ctx.Dr3 != 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool checkDebuggerProcesses() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(pe32);
+
+    if (Process32FirstW(snapshot, &pe32)) {
+        do {
+            std::wstring processName = pe32.szExeFile;
+            std::transform(processName.begin(), processName.end(), processName.begin(), ::towlower);
+
+            // 디버거 프로세스 검사
+            if (processName == L"ollydbg.exe" || 
+                processName == L"x64dbg.exe" || 
+                processName == L"ida.exe" || 
+                processName == L"ida64.exe" ||
+                processName == L"windbg.exe" ||
+                processName == L"immunitydebugger.exe") {
+                CloseHandle(snapshot);
+                return true;
+            }
+        } while (Process32NextW(snapshot, &pe32));
+    }
+
+    CloseHandle(snapshot);
+    return false;
+}
+
+bool checkExecutionTime() {
+    static LARGE_INTEGER frequency;
+    static LARGE_INTEGER start;
+    static bool initialized = false;
+
+    if (!initialized) {
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&start);
+        initialized = true;
+        return false;
+    }
+
+    LARGE_INTEGER end;
+    QueryPerformanceCounter(&end);
+
+    double elapsed = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
+    if (elapsed > MAX_EXECUTION_TIME) {
+        return true;
+    }
+
+    return false;
+}
+
+void StartAntiDebugging() {
+    std::thread([]() {
+        while (true) {
+            if (isBeingDebugged() || checkDebuggerProcesses() || checkExecutionTime()) {
+                // 디버깅 감지 시 프로그램 종료
+                ExitProcess(0);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(DEBUG_CHECK_INTERVAL));
+        }
+    }).detach();
+}
+
 int main(int argc, char* argv[]) {
+    // 안티 디버깅 시작
+    StartAntiDebugging();
+    
     KillSuspiciousProcesses();
     StartSuspiciousProcessMonitor();
     // OpenSSL initialization
