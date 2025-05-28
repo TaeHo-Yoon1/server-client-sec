@@ -25,8 +25,9 @@ constexpr int SERVER_PORT = 9000;
 constexpr int BUFFER_SIZE = 1024;
 
 // 안티 디버깅 관련 상수
-constexpr DWORD DEBUG_CHECK_INTERVAL = 1000; // 1초
-constexpr DWORD MAX_EXECUTION_TIME = 100;    // 100ms
+constexpr DWORD DEBUG_CHECK_INTERVAL = 2000;  // 2초로 증가
+constexpr DWORD MAX_EXECUTION_TIME = 500;     // 500ms로 증가
+constexpr int MAX_DEBUG_WARNINGS = 3;         // 최대 경고 횟수
 
 static std::atomic<bool> running{ true };
 static SOCKET client_socket = INVALID_SOCKET;
@@ -56,6 +57,9 @@ const std::vector<std::string> suspicious_keywords = {
     "amazon",
     "ebay"
 };
+
+// 디버깅 감지 횟수를 추적하는 변수
+static std::atomic<int> debug_warning_count{0};
 
 bool isValidInputSource(KBDLLHOOKSTRUCT* p) {
     // 예시: 정상 입력만 허용 (추가 검증 로직 필요시 여기에)
@@ -249,6 +253,7 @@ bool isMaliciousUrl(const std::string& message) {
 bool isBeingDebugged() {
     // IsDebuggerPresent API 체크
     if (IsDebuggerPresent()) {
+        std::cout << "[WARNING] Debugger detected." << std::endl;
         return true;
     }
 
@@ -256,6 +261,7 @@ bool isBeingDebugged() {
     BOOL isDebuggerPresent = FALSE;
     CheckRemoteDebuggerPresent(GetCurrentProcess(), &isDebuggerPresent);
     if (isDebuggerPresent) {
+        std::cout << "[WARNING] Remote debugger detected." << std::endl;
         return true;
     }
 
@@ -264,6 +270,7 @@ bool isBeingDebugged() {
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     if (GetThreadContext(GetCurrentThread(), &ctx)) {
         if (ctx.Dr0 != 0 || ctx.Dr1 != 0 || ctx.Dr2 != 0 || ctx.Dr3 != 0) {
+            std::cout << "[WARNING] Hardware breakpoint detected." << std::endl;
             return true;
         }
     }
@@ -292,6 +299,7 @@ bool checkDebuggerProcesses() {
                 processName == L"ida64.exe" ||
                 processName == L"windbg.exe" ||
                 processName == L"immunitydebugger.exe") {
+                std::wcout << L"[WARNING] Suspicious process detected: " << processName << std::endl;
                 CloseHandle(snapshot);
                 return true;
             }
@@ -319,6 +327,7 @@ bool checkExecutionTime() {
 
     double elapsed = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
     if (elapsed > MAX_EXECUTION_TIME) {
+        std::cout << "[WARNING] Suspicious execution time detected." << std::endl;
         return true;
     }
 
@@ -328,10 +337,29 @@ bool checkExecutionTime() {
 void StartAntiDebugging() {
     std::thread([]() {
         while (true) {
-            if (isBeingDebugged() || checkDebuggerProcesses() || checkExecutionTime()) {
-                // 디버깅 감지 시 프로그램 종료
-                ExitProcess(0);
+            bool debugDetected = false;
+            
+            if (isBeingDebugged()) {
+                debugDetected = true;
             }
+            if (checkDebuggerProcesses()) {
+                debugDetected = true;
+            }
+            if (checkExecutionTime()) {
+                debugDetected = true;
+            }
+
+            if (debugDetected) {
+                debug_warning_count++;
+                std::cout << "[WARNING] Debug attempt detected. (" 
+                         << debug_warning_count << "/" << MAX_DEBUG_WARNINGS << ")" << std::endl;
+                
+                if (debug_warning_count >= MAX_DEBUG_WARNINGS) {
+                    std::cout << "[WARNING] Excessive debugging attempts. Program will terminate." << std::endl;
+                    ExitProcess(0);
+                }
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(DEBUG_CHECK_INTERVAL));
         }
     }).detach();
