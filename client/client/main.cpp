@@ -14,6 +14,8 @@
 #include <tlhelp32.h>
 #include <algorithm>
 #include <chrono>
+#include <regex>
+#include <unordered_set>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "user32.lib")
@@ -26,6 +28,29 @@ static SOCKET client_socket = INVALID_SOCKET;
 
 HHOOK g_hKeyboardHook = NULL;
 std::atomic<bool> g_blockAbnormalInput{false};
+
+// 알려진 악성 도메인 목록
+const std::vector<std::string> malicious_domains = {
+    "malicious-site.com",
+    "phishing-site.net",
+    "scam-site.org",
+    "fake-login.com",
+    "steal-password.net"
+};
+
+// 의심스러운 키워드 목록
+const std::vector<std::string> suspicious_keywords = {
+    "login",
+    "password",
+    "account",
+    "verify",
+    "confirm",
+    "secure",
+    "bank",
+    "paypal",
+    "amazon",
+    "ebay"
+};
 
 bool isValidInputSource(KBDLLHOOKSTRUCT* p) {
     // 예시: 정상 입력만 허용 (추가 검증 로직 필요시 여기에)
@@ -143,6 +168,76 @@ void StartSuspiciousProcessMonitor() {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }).detach();
+}
+
+bool containsSuspiciousKeywords(const std::string& url) {
+    std::string lowerUrl = url;
+    std::transform(lowerUrl.begin(), lowerUrl.end(), lowerUrl.begin(), ::tolower);
+    
+    for (const auto& keyword : suspicious_keywords) {
+        if (lowerUrl.find(keyword) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isUrl(const std::string& str) {
+    try {
+        static const std::regex url_pattern(
+            R"(https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*))"
+        );
+        return std::regex_search(str, url_pattern);
+    } catch (const std::regex_error& e) {
+        std::cerr << "Regex error: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+std::string extractDomain(const std::string& url) {
+    try {
+        static const std::regex domain_pattern(R"(https?:\/\/(?:www\.)?([^\/]+))");
+        std::smatch matches;
+        if (std::regex_search(url, matches, domain_pattern) && matches.size() > 1) {
+            return matches[1].str();
+        }
+    } catch (const std::regex_error& e) {
+        std::cerr << "Regex error: " << e.what() << std::endl;
+    }
+    return "";
+}
+
+bool isMaliciousUrl(const std::string& message) {
+    // URL이 아닌 경우 검사하지 않음
+    if (!isUrl(message)) {
+        return false;
+    }
+
+    // 도메인 추출
+    std::string domain = extractDomain(message);
+    if (domain.empty()) {
+        return false;
+    }
+
+    // 알려진 악성 도메인 검사
+    for (const auto& malicious : malicious_domains) {
+        if (domain.find(malicious) != std::string::npos) {
+            return true;
+        }
+    }
+
+    // 의심스러운 키워드 검사
+    if (containsSuspiciousKeywords(message)) {
+        // 추가 검증이 필요한 경우 여기에 구현
+        return true;
+    }
+
+    // IP 주소로 된 URL 차단
+    if (std::regex_search(domain, std::regex(R"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"))) {
+        return true;
+    }
+
+    return false;
 }
 
 int main(int argc, char* argv[]) {
@@ -279,6 +374,20 @@ int main(int argc, char* argv[]) {
             running = false;
             break;
         }
+
+        // URL 검사
+        if (isMaliciousUrl(input)) {
+            std::cout << "[WARNING] Suspicious URL detected and blocked." << std::endl;
+            std::cout << "Blocked reason: " << std::endl;
+            if (containsSuspiciousKeywords(input)) {
+                std::cout << "- Contains suspicious keywords" << std::endl;
+            }
+            if (std::regex_search(extractDomain(input), std::regex(R"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"))) {
+                std::cout << "- IP address-based URL" << std::endl;
+            }
+            continue;
+        }
+
         input += '\n';
         if (SSL_write(ssl, input.c_str(), input.length()) <= 0) {
             log_error("Failed to send message");
