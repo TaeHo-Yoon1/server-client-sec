@@ -9,6 +9,8 @@
 #include <cstring>          
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -35,12 +37,12 @@ static std::vector<Room>        rooms;
 static std::map<SOCKET, Client> clients;
 static std::mutex               mtx;
 
-void broadcast(int room_id, const std::string& msg, SOCKET except = INVALID_SOCKET) {
+void broadcast(int room_id, const std::string& msg, SSL* except = nullptr) {
     std::vector<SOCKET> targets;
     {
         std::lock_guard<std::mutex> lock(mtx);
         for (SOCKET s : rooms[room_id].clients) {
-            if (s != except) targets.push_back(s);
+            if (except == nullptr || SSL_get_fd(except) != s) targets.push_back(s);
         }
     }
     for (SOCKET s : targets) {
@@ -69,15 +71,23 @@ int levenshtein(const std::string& s1, const std::string& s2) {
     return dp[m][n];
 }
 
-void handleClient(SOCKET sock) {
+void handleClient(SOCKET sock, SSL_CTX* ctx) {
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, (int)sock);
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(ssl);
+        closesocket(sock);
+        return;
+    }
     std::cout << "New client thread started: " << sock << std::endl;
     char buf[1024];
 
     const char* prompt = "Enter /nick <name> to set nickname\n";
-    send(sock, prompt, strlen(prompt), 0);
+    SSL_write(ssl, prompt, strlen(prompt));
 
     while (true) {
-        int len = recv(sock, buf, sizeof(buf) - 1, 0);
+        int len = SSL_read(ssl, buf, sizeof(buf) - 1);
         if (len <= 0) break;
         buf[len] = '\0';
 
@@ -93,7 +103,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Invalid nickname\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
                 continue;
             }
             std::lock_guard<std::mutex> lock(mtx);
@@ -109,7 +119,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Nickname in use\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
             }
             else {
                 clients[sock].nick = name;
@@ -117,7 +127,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Nickname set\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
                 // Show room list after setting nickname
                 std::ostringstream out;
                 out << "====================\nRooms:\n";
@@ -128,7 +138,7 @@ void handleClient(SOCKET sock) {
                 }
                 out << "====================\n";
                 auto s = out.str();
-                send(sock, s.data(), s.size(), 0);
+                SSL_write(ssl, s.data(), s.size());
             }
         }
         else if (cmd == "/list") {
@@ -142,7 +152,7 @@ void handleClient(SOCKET sock) {
             }
             out << "====================\n";
             auto s = out.str();
-            send(sock, s.data(), s.size(), 0);
+            SSL_write(ssl, s.data(), s.size());
         }
         else if (cmd == "/create") {
             std::string rname;
@@ -153,7 +163,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Max rooms reached\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
             }
             else {
                 rooms.push_back({ rname, {} });
@@ -161,7 +171,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Room created\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
             }
         }
         else if (cmd == "/join") {
@@ -171,7 +181,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Usage: /join <room_id>\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
                 continue;
             }
             int prev = -1;
@@ -185,7 +195,7 @@ void handleClient(SOCKET sock) {
                         "====================\n"
                         "No such room\n"
                         "====================\n";
-                    send(sock, msg, strlen(msg), 0);
+                    SSL_write(ssl, msg, strlen(msg));
                     continue;
                 }
                 else if (rooms[id].clients.size() >= MAX_CLIENTS_PER_ROOM) {
@@ -193,7 +203,7 @@ void handleClient(SOCKET sock) {
                         "====================\n"
                         "Room full\n"
                         "====================\n";
-                    send(sock, msg, strlen(msg), 0);
+                    SSL_write(ssl, msg, strlen(msg));
                     continue;
                 }
                 else {
@@ -209,15 +219,9 @@ void handleClient(SOCKET sock) {
                         "====================\n"
                         "Joined room\n"
                         "====================\n";
-                    send(sock, msg, strlen(msg), 0);
+                    SSL_write(ssl, msg, strlen(msg));
                     sendJoinMsg = !clients[sock].nick.empty();
                 }
-            }
-            if (prev >= 0 && !leaveMsg.empty()) {
-                broadcast(prev, leaveMsg, sock);
-            }
-            if (sendJoinMsg && !joinMsg.empty()) {
-                broadcast(id, joinMsg, sock);
             }
         }
         else if (cmd == "/w") {
@@ -244,7 +248,7 @@ void handleClient(SOCKET sock) {
                     "====================\n"
                     "Left room\n"
                     "====================\n";
-                send(sock, msg, strlen(msg), 0);
+                SSL_write(ssl, msg, strlen(msg));
             }
         }
         else if (cmd == "/help") {
@@ -260,7 +264,7 @@ void handleClient(SOCKET sock) {
                 "/exit - Leave current room\n"
                 "/quit - Exit the program\n"
                 "====================\n";
-            send(sock, help_msg, strlen(help_msg), 0);
+            SSL_write(ssl, help_msg, strlen(help_msg));
         }
         else if (cmd == "/quit") {
             break;
@@ -281,12 +285,11 @@ void handleClient(SOCKET sock) {
                 }
                 out << "====================\n";
                 auto s = out.str();
-                send(sock, s.data(), s.size(), 0);
+                SSL_write(ssl, s.data(), s.size());
             } else {
                 int rid = clients[sock].room_id;
                 if (rid >= 0 && !clients[sock].nick.empty()) {
                     std::string out = clients[sock].nick + ": " + buf;
-                    broadcast(rid, out, sock);
                 }
             }
         }
@@ -298,19 +301,45 @@ void handleClient(SOCKET sock) {
         if (rid >= 0) rooms[rid].clients.erase(sock);
         clients.erase(sock);
     }
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
     closesocket(sock);
 }
 
 int main() {
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "WSAStartup failed" << std::endl;
         return 1;
     }
 
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        std::cerr << "SSL_CTX_new failed" << std::endl;
+        WSACleanup();
+        return 1;
+    }
+    if (SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM) <= 0) {
+        std::cerr << "SSL_CTX_use_certificate_file failed" << std::endl;
+        SSL_CTX_free(ctx);
+        WSACleanup();
+        return 1;
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM) <= 0) {
+        std::cerr << "SSL_CTX_use_PrivateKey_file failed" << std::endl;
+        SSL_CTX_free(ctx);
+        WSACleanup();
+        return 1;
+    }
+
     SOCKET ls = socket(AF_INET, SOCK_STREAM, 0);
     if (ls == INVALID_SOCKET) {
         std::cerr << "Socket creation failed" << std::endl;
+        SSL_CTX_free(ctx);
         WSACleanup();
         return 1;
     }
@@ -323,6 +352,7 @@ int main() {
     if (bind(ls, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         std::cerr << "Bind failed" << std::endl;
         closesocket(ls);
+        SSL_CTX_free(ctx);
         WSACleanup();
         return 1;
     }
@@ -330,6 +360,7 @@ int main() {
     if (listen(ls, 5) == SOCKET_ERROR) {
         std::cerr << "Listen failed" << std::endl;
         closesocket(ls);
+        SSL_CTX_free(ctx);
         WSACleanup();
         return 1;
     }
@@ -347,10 +378,11 @@ int main() {
             std::lock_guard<std::mutex> lock(mtx);
             clients.emplace(cs, Client(cs, "", -1));
         }
-        std::thread(handleClient, cs).detach();
+        std::thread(handleClient, cs, ctx).detach();
     }
 
     closesocket(ls);
+    SSL_CTX_free(ctx);
     WSACleanup();
     return 0;
 }
