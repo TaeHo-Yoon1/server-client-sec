@@ -203,10 +203,15 @@ void handleClient(SOCKET sock) {
             break;
         }
         else {
-            int rid = clients[sock].room_id;
-            if (rid >= 0 && !clients[sock].nick.empty()) {
-                std::string out = clients[sock].nick + ": " + buf;
-                broadcast(rid, out, sock);
+            if (!cmd.empty() && cmd[0] == '/') {
+                const char* unknown_cmd = "Unknown command. Please try again.\n";
+                send(sock, unknown_cmd, strlen(unknown_cmd), 0);
+            } else {
+                int rid = clients[sock].room_id;
+                if (rid >= 0 && !clients[sock].nick.empty()) {
+                    std::string out = clients[sock].nick + ": " + buf;
+                    broadcast(rid, out, sock);
+                }
             }
         }
     }
