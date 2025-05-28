@@ -11,3 +11,4 @@ Release/
 *.vcxproj.user
 *.vcxproj.user.props
 c_cpp_properties.json
+keylog.txt

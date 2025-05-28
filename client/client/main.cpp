@@ -10,14 +10,62 @@
 #include <vector>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <windows.h>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "user32.lib")
 
 constexpr int SERVER_PORT = 9000;
 constexpr int BUFFER_SIZE = 1024;
 
 static std::atomic<bool> running{ true };
 static SOCKET client_socket = INVALID_SOCKET;
+
+HHOOK g_hKeyboardHook = NULL;
+std::atomic<bool> g_blockAbnormalInput{false};
+
+bool isValidInputSource(KBDLLHOOKSTRUCT* p) {
+    // 예시: 정상 입력만 허용 (추가 검증 로직 필요시 여기에)
+    // 예: 스캔코드, 플래그, 타이밍 등 분석 가능
+    return true; // 기본은 모두 허용, 필요시 조건 추가
+}
+
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        KBDLLHOOKSTRUCT* p = (KBDLLHOOKSTRUCT*)lParam;
+        if (!isValidInputSource(p) || g_blockAbnormalInput) {
+            // 비정상 입력 차단
+            return 1;
+        }
+    }
+    return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
+void InstallKeyboardHook() {
+    g_hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
+}
+
+void UninstallKeyboardHook() {
+    if (g_hKeyboardHook) {
+        UnhookWindowsHookEx(g_hKeyboardHook);
+        g_hKeyboardHook = NULL;
+    }
+}
+
+void StartInputBypassDetection() {
+    std::thread([]() {
+        while (true) {
+            // DirectInput 등 비정상 입력 감지
+            HMODULE dinput = GetModuleHandle(L"dinput8.dll");
+            if (dinput) {
+                g_blockAbnormalInput = true;
+            } else {
+                g_blockAbnormalInput = false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }).detach();
+}
 
 void log_error(const std::string& msg) {
     std::cerr << "[ERROR] " << msg << std::endl;
@@ -200,6 +248,9 @@ int main(int argc, char* argv[]) {
     WSACleanup();
     EVP_cleanup();
     ERR_free_strings();
+
+    InstallKeyboardHook();
+    StartInputBypassDetection();
 
     return 0;
 }
