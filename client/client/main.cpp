@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <chrono>
 #include <regex>
-#include <unordered_set>
 #include <intrin.h>
 
 #pragma comment(lib, "ws2_32.lib")
@@ -24,10 +23,12 @@
 constexpr int SERVER_PORT = 9000;
 constexpr int BUFFER_SIZE = 1024;
 
+
 // 안티 디버깅 관련 상수
-constexpr DWORD DEBUG_CHECK_INTERVAL = 2000;  // 2초로 증가
-constexpr DWORD MAX_EXECUTION_TIME = 500;     // 500ms로 증가
+constexpr DWORD DEBUG_CHECK_INTERVAL = 2000;  // 2초
+constexpr DWORD MAX_EXECUTION_TIME = 2000;    // 2초로 증가
 constexpr int MAX_DEBUG_WARNINGS = 3;         // 최대 경고 횟수
+constexpr int EXECUTION_TIME_SAMPLES = 5;     // 샘플 수
 
 static std::atomic<bool> running{ true };
 static SOCKET client_socket = INVALID_SOCKET;
@@ -60,6 +61,15 @@ const std::vector<std::string> suspicious_keywords = {
 
 // 디버깅 감지 횟수를 추적하는 변수
 static std::atomic<int> debug_warning_count{0};
+
+// 실행 시간 측정을 위한 구조체
+struct ExecutionTimeData {
+    double times[EXECUTION_TIME_SAMPLES];
+    int currentIndex;
+    bool initialized;
+};
+
+static ExecutionTimeData execTimeData = {{0}, 0, false};
 
 bool isValidInputSource(KBDLLHOOKSTRUCT* p) {
     // 예시: 정상 입력만 허용 (추가 검증 로직 필요시 여기에)
@@ -275,6 +285,24 @@ bool isBeingDebugged() {
         }
     }
 
+    // NtGlobalFlag는 참고용 로그만 남김 (디버깅 카운트에는 반영하지 않음)
+    DWORD ntGlobalFlag = 0;
+    __try {
+        ULONG_PTR peb = 0;
+    #ifdef _M_X64
+        peb = __readgsqword(0x60);
+        ntGlobalFlag = *(DWORD*)(peb + 0xBC);
+    #elif defined(_M_IX86)
+        peb = __readfsdword(0x30);
+        ntGlobalFlag = *(DWORD*)(peb + 0x68);
+    #endif
+        if (ntGlobalFlag & 0x70) {
+            std::cout << "[INFO] NtGlobalFlag is set (not always debugging)." << std::endl;
+            // return false; // 디버깅으로 간주하지 않음
+        }
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER) {}
+
     return false;
 }
 
@@ -298,7 +326,9 @@ bool checkDebuggerProcesses() {
                 processName == L"ida.exe" || 
                 processName == L"ida64.exe" ||
                 processName == L"windbg.exe" ||
-                processName == L"immunitydebugger.exe") {
+                processName == L"immunitydebugger.exe" ||
+                processName == L"processhacker.exe" ||
+                processName == L"processexplorer.exe") {
                 std::wcout << L"[WARNING] Suspicious process detected: " << processName << std::endl;
                 CloseHandle(snapshot);
                 return true;
@@ -313,22 +343,45 @@ bool checkDebuggerProcesses() {
 bool checkExecutionTime() {
     static LARGE_INTEGER frequency;
     static LARGE_INTEGER start;
-    static bool initialized = false;
-
-    if (!initialized) {
+    
+    if (!execTimeData.initialized) {
         QueryPerformanceFrequency(&frequency);
-        QueryPerformanceCounter(&start);
-        initialized = true;
+        execTimeData.initialized = true;
         return false;
     }
 
+    QueryPerformanceCounter(&start);
+    
+    // 약간의 지연을 주어 실제 실행 시간 측정
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    
     LARGE_INTEGER end;
     QueryPerformanceCounter(&end);
 
     double elapsed = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
-    if (elapsed > MAX_EXECUTION_TIME) {
-        std::cout << "[WARNING] Suspicious execution time detected." << std::endl;
-        return true;
+    
+    // 실행 시간을 배열에 저장
+    execTimeData.times[execTimeData.currentIndex] = elapsed;
+    execTimeData.currentIndex = (execTimeData.currentIndex + 1) % EXECUTION_TIME_SAMPLES;
+
+    // 평균 실행 시간 계산
+    double avgTime = 0;
+    int validSamples = 0;
+    for (int i = 0; i < EXECUTION_TIME_SAMPLES; i++) {
+        if (execTimeData.times[i] > 0) {
+            avgTime += execTimeData.times[i];
+            validSamples++;
+        }
+    }
+    
+    if (validSamples > 0) {
+        avgTime /= validSamples;
+        
+        // 평균 실행 시간이 임계값을 크게 초과하는 경우에만 디버깅으로 판단
+        if (avgTime > MAX_EXECUTION_TIME && validSamples >= EXECUTION_TIME_SAMPLES) {
+            std::cout << "[WARNING] Suspicious execution time detected. Average: " << avgTime << "ms" << std::endl;
+            return true;
+        }
     }
 
     return false;
